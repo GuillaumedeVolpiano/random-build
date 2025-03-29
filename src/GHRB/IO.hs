@@ -263,8 +263,8 @@ capturePortageOutput ::
 capturePortageOutput pkg = do
   emerge <- asks getEmerge
   stderr
-    (emerge ++ " " ++ unwords defaultEmergeArgs ++ " " ++ "--pretend --color=n")
-  (exitCode, stdOut, stdErr) <- runEmerge ["--pretend", "--color=n"] pkg
+    (emerge ++ " " ++ unwords defaultEmergeArgs ++ " " ++ "--pretend --color=y")
+  (exitCode, stdOut, stdErr) <- runEmerge ["--pretend", "--color=y"] pkg
   let output = stdOut ++ stdErr
   stderr ("pretend_return: " ++ output)
   pure (exitCode, output)

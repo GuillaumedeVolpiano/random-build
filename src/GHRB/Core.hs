@@ -24,7 +24,7 @@ module GHRB.Core
   , updateInstalled
   ) where
 
-import           Control.Applicative        (many, optional, (<|>))
+import           Control.Applicative        (many, optional, some, (<|>))
 import           Control.Monad              (void)
 import qualified Data.ByteString            as BS (ByteString)
 import qualified Data.ByteString.Char8      as BS (pack)
@@ -42,10 +42,10 @@ import           Distribution.Portage.Types (Category (Category),
                                              getVersion, unwrapCategory,
                                              unwrapPkgName)
 import           FlatParse.Basic            (Parser, Result (OK), char, eof,
-                                             runParser, satisfy, string) --, anyChar
+                                             runParser, satisfy, string)
 import           GHRB.Core.Types            (PackageSet, St (St), completed,
-                                             downgrade, failed,
-                                             tried, unresolved, untried, installed)
+                                             downgrade, failed, installed,
+                                             tried, unresolved, untried)
 
 buildEmptyState :: St
 buildEmptyState = St mempty mempty mempty mempty mempty mempty mempty undefined
@@ -59,24 +59,17 @@ parsePackageList packageList =
 parsePackages :: Parser Void PackageSet
 parsePackages = parsePackage <|> (eof >> return mempty)
 
--- stripANSI :: (Char -> Bool) -> Parser Void String
--- stripANSI terminator = parseANSI terminator <|> (satisfy terminator >> pure "") <|> parseChar terminator
--- 
--- parseChar :: (Char -> Bool) -> Parser Void String
--- parseChar terminator = anyChar >>= \c -> (c :) <$> stripANSI terminator
--- 
--- parseANSI :: (Char -> Bool) -> Parser Void String
--- parseANSI terminator = do
---   $(string "\\[ESC")
---   void $ many (satisfy (/= 'm'))
---   $(char 'm')
---   stripANSI terminator
--- 
+parseANSI :: Parser Void ()
+parseANSI = do
+  $(string "\\[ESC")
+  void $ many (satisfy (/= 'm'))
+  $(char 'm')
+
 parsePackage :: Parser Void PackageSet
 parsePackage = do
   category <- many (satisfy (/= '/'))
   $(char '/')
-  name <- many (satisfy (/= '\n'))
+  name <- many (satisfy (/= '\n'))
   void . optional $ $(char '\n')
   Set.insert
     Package
@@ -93,10 +86,12 @@ parseDowngrades = runParser parseDowngradeByLine
 
 parseDowngradeByLine :: Parser Void Bool
 parseDowngradeByLine =
-  ($(string "[ebuild")
-     >> satisfy (`notElem` "^\\[]D")
+  ($(char '[')
+     >> some parseANSI
+     >> $(string "ebuild")
+     >> many (parseANSI <|> void (satisfy (`notElem` "D[]")))
      >> $(char 'D')
-     >> satisfy (`notElem` "^\\[]")
+     >> many (parseANSI <|> void (satisfy (`notElem` "[]\n")))
      >> $(char ']')
      >> pure True)
     <|> (many (satisfy (/= '\n')) >> $(char '\n') >> parseDowngradeByLine)
@@ -123,16 +118,13 @@ getUntried packages st = st {untried = packages'}
     packages' = filter (\p -> not (p `Set.member` tried st)) packages
 
 failedResolve :: UTCTime -> Package -> St -> St
-failedResolve t p st =
-  st {unresolved = Set.insert (t, p) . unresolved $ st}
+failedResolve t p st = st {unresolved = Set.insert (t, p) . unresolved $ st}
 
 hasDowngraded :: UTCTime -> Package -> St -> St
-hasDowngraded t p st =
-  st {downgrade = Set.insert (t, p) . downgrade $ st}
+hasDowngraded t p st = st {downgrade = Set.insert (t, p) . downgrade $ st}
 
 hasCompleted :: UTCTime -> Package -> St -> St
-hasCompleted t p st =
-  st {completed = Set.insert (t, p) . completed $ st}
+hasCompleted t p st = st {completed = Set.insert (t, p) . completed $ st}
 
 hasFailed :: UTCTime -> Package -> St -> St
 hasFailed t p st = st {failed = Set.insert (t, p) . failed $ st}
@@ -144,4 +136,5 @@ updateInstalled :: UTCTime -> [Package] -> PackageSet -> St -> St
 updateInstalled time ps inst st = st'
   where
     (comp, untried') = partition (`Set.member` inst) ps
-    st' = foldr (hasCompleted time) st {untried = untried', installed=inst} comp
+    st' =
+      foldr (hasCompleted time) st {untried = untried', installed = inst} comp
