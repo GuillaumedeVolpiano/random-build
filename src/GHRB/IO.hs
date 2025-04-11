@@ -1,5 +1,6 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE TypeOperators    #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators       #-}
 
 module GHRB.IO
   ( randomBuild
@@ -9,12 +10,15 @@ module GHRB.IO
   ) where
 
 import qualified Data.ByteString.Char8         as BS (pack)
+import           Data.HashMap.Strict           (keysSet)
 import qualified Data.HashSet                  as Set (difference, intersection,
-                                                       size)
+                                                       map, size)
 import           Data.List                     (uncons)
 import qualified Data.Text                     as T (unpack)
+import qualified Data.Text.Lazy                as TL (pack)
 import           Data.Time.Clock               (UTCTime)
-import           Distribution.Portage.Types    (Package)
+import           Distribution.Portage.Types    (Package (Package, getRepository, getVersion),
+                                                Repository (Repository))
 import           Effectful                     (Eff, (:>))
 import           Effectful.Concurrent          (Concurrent)
 import           Effectful.FileSystem          (FileSystem)
@@ -30,7 +34,7 @@ import           GHRB.Core                     (addTried, failedResolve,
                                                 parseDowngrades,
                                                 parsePackageList, prettyPackage,
                                                 toDate, updateInstalled)
-import           GHRB.Core.Types               (Args,
+import           GHRB.Core.Types               (Args (getPackage),
                                                 EmergeResult (BuildFailed, EmergeSuccess),
                                                 PackageSet,
                                                 PrelimEmergeResult (PrelimEmergeSuccess, ResolveFailed, TriedToDowngrade),
@@ -49,10 +53,15 @@ import           GHRB.IO.Cmd                   (defaultEmergeArgs,
                                                 runTransparent)
 import           GHRB.IO.Utils                 (bStderr, bStdout, logOutput,
                                                 stderr, stdout)
+import           RevdepScanner                 (ConstraintMap,
+                                                MatchMode (Matching, NonMatching),
+                                                argsR, lookupResults, parseAll)
 import           System.Exit                   (ExitCode (ExitFailure, ExitSuccess))
 
+import Debug.Trace
+
 tmpLogRoot :: String
-tmpLogRoot = "/tmp/random-pkg-"
+tmpLogRoot = "/tm:p/random-pkg-"
 
 runPquery ::
      (Process :> es, Reader Args :> es)
@@ -87,12 +96,7 @@ runEmerge args pkg =
       ""
 
 runHaskellUpdater ::
-     ( 
-      FileSystem :> es
-     , Process :> es
-     , Reader Args :> es
-     , Concurrent :> es
-     )
+     (FileSystem :> es, Process :> es, Reader Args :> es, Concurrent :> es)
   => Eff es (ExitCode, Stdout, Stderr)
 runHaskellUpdater =
   asks getHU >>= \haskellUpdater -> runTransparent haskellUpdater defaultHUArgs
@@ -101,11 +105,34 @@ currentUntried ::
      (FileSystem :> es, Reader Args :> es, Process :> es)
   => Eff es (Either Running PackageSet)
 currentUntried = do
-  ap <- asks getAllPackages
-  rawInstalled <- currentInstalled
+  pa <- asks getPackage
+  ap <-
+    case pa of
+      Nothing -> asks getAllPackages
+      Just p  -> traceShow p revdeps p
+  rawInstalled <- traceShow ap currentInstalled
   case rawInstalled of
     Left _     -> pure rawInstalled
     Right inst -> pure . Right $ Set.difference ap inst
+
+revdeps :: (Reader Args :> es, Process :> es) => Package -> Eff es PackageSet
+revdeps p = do
+  pquery <- asks getPquery
+  let args' = argsR (Repository repo)
+  (_, out, _) <- readProcessWithExitCode pquery args' ""
+  let m =
+        case parseAll . TL.pack $ out of
+          Right (rm :: ConstraintMap) -> traceShow args' rm
+          Left _                      -> error "failed to parse contraint map"
+      mode =
+        case getVersion p of
+          Nothing -> NonMatching
+          _       -> Matching
+      r = traceShow mode lookupResults mode p m
+  pure
+    . Set.map (\(c, pkg, v, s, rp) -> Package c pkg (Just v) (Just s) (Just rp))
+    . keysSet
+    $ r
 
 currentInstalled ::
      (Reader Args :> es, Process :> es, FileSystem :> es)
@@ -166,8 +193,7 @@ processIfNotDowngrade output = do
     else pure (PrelimEmergeSuccess, output)
 
 install ::
-     ( 
-     FileSystem :> es
+     ( FileSystem :> es
      , State St :> es
      , Reader Args :> es
      , Process :> es

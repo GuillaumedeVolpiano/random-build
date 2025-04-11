@@ -8,11 +8,13 @@ module GHRB.Core.Types
   , PqueryPath
   , EmergePath
   , HaskellUpdaterPath
+  , RevdepScannerPath
   , --Console arguments
     Args(Args)
   , getPquery
   , getEmerge
   , getHU
+  , getPackage
   , getOutputMode
   , getErrMode
   , getAllPackages
@@ -49,14 +51,14 @@ import           Control.Applicative           (optional, (<|>))
 import qualified Data.ByteString.Lazy          as BL (ByteString)
 import           Data.HashSet                  (HashSet)
 import qualified Data.HashSet                  as Set (map, size, toList)
+import           Data.Parsable                 (runParsable)
+import           Data.Time.Clock.Compat        (UTCTime)
 import           Distribution.Portage.Types    (Package, getCategory,
                                                 getPkgName, unwrapCategory,
                                                 unwrapPkgName)
 import           Options.Applicative           (Parser, flag', help, long,
                                                 metavar, short, strOption,
                                                 value)
-
-import           Data.Time.Clock.Compat        (UTCTime)
 import           Prettyprinter                 (Doc, SimpleDocStream, annotate,
                                                 defaultLayoutOptions, hardline,
                                                 layoutPretty, pretty, vsep,
@@ -72,6 +74,8 @@ type EmergePath = FilePath
 type PqueryPath = FilePath
 
 type HaskellUpdaterPath = FilePath
+
+type RevdepScannerPath = FilePath
 
 data PrelimEmergeResult
   = ResolveFailed UTCTime
@@ -108,6 +112,7 @@ data Args = Args
   { getPquery      :: String
   , getEmerge      :: String
   , getHU          :: String
+  , getPackage     :: Maybe Package
   , getOutputMode  :: Output
   , getErrMode     :: Output
   , getAllPackages :: PackageSet
@@ -250,6 +255,15 @@ args =
              <> metavar "Filepath"
              <> value ""
              <> help "Path to the haskell-updater binary")
+    <*> (parsePackage
+           <$> strOption
+                 (long "package"
+                    <> short 'a'
+                    <> metavar "Package and potential version"
+                    <> value ""
+                    <> help
+                         "Use revdep-scanner with specified package and version instead \
+                        \of the whole repository as the initial list"))
     <*> ((\case
             Nothing -> Std
             Just a -> a)
@@ -259,6 +273,15 @@ args =
             Just a -> a)
            <$> optional (logFile <|> stdErr <|> quiet))
     <*> pure mempty
+
+parsePackage :: String -> Maybe Package
+parsePackage s
+  | null s = Nothing
+  | otherwise =
+    case runParsable "package argument" s of
+      Left _ ->
+        error "At least one full package name (and optional version) required"
+      Right p -> Just p
 
 outputFile :: Parser Output
 outputFile =
