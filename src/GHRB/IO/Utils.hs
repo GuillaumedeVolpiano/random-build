@@ -28,9 +28,10 @@ import           Effectful.Reader.Static                 (Reader, asks)
 import           GHRB.Core.Types                         (Args, EmergePath,
                                                           HaskellUpdaterPath,
                                                           Output (DevNull, OutFile, Std),
-                                                          PqueryPath, args,
-                                                          getEmerge, getErrMode,
-                                                          getHU, getOutputMode,
+                                                          PqueryPath,
+                                                          args, getEmerge,
+                                                          getErrMode, getHU,
+                                                          getOutputMode,
                                                           getPquery)
 import           Options.Applicative                     (execParser, fullDesc,
                                                           helper, info,
@@ -98,7 +99,8 @@ getArgs = do
     if null (getHU args')
       then haskellUpdaterPath
       else pure . getHU $ args'
-  pure args' {getPquery = pquery, getEmerge = emerge, getHU = hu}
+  pure
+    args' {getPquery = pquery, getEmerge = emerge, getHU = hu}
 
 emergePath ::
      (IOE :> es, FileSystem :> es, Environment :> es) => Eff es EmergePath

@@ -32,11 +32,13 @@ import Effectful.Concurrent (Concurrent, runConcurrent)
 import           GHRB.Core                     (buildEmptyState)
 import           GHRB.Core.Types               (Args, Running (Running), St,
                                                 getAllPackages, getPquery,
-                                                untried)
+                                                untried, getPackage)
 import           GHRB.IO                       (allPackages, currentUntried,
                                                 randomBuild, terminate)
 import           GHRB.IO.Utils                 (getArgs, stderr)
 import           List.Shuffle                  (shuffleIO)
+
+import Debug.Trace
 
 builder ::
      ( FileSystem :> es
@@ -57,7 +59,7 @@ main =
     let initialState = buildEmptyState
     args <- getArgs
     runProcess $ do
-      rawAp <- allPackages . getPquery $ args
+      rawAp <- allPackages (getPackage args). getPquery $ args
       case rawAp of
         Nothing ->
           runReader args $ stderr "Could not get list of all available packages"
@@ -69,4 +71,4 @@ main =
               Right set -> do
                 untried' <- liftIO . shuffleIO . toList $ set
                 let state = initialState {untried = untried'}
-                runConcurrent . runTime . evalState state $ finally builder terminate
+                traceShow untried' runConcurrent . runTime . evalState state $ finally builder terminate

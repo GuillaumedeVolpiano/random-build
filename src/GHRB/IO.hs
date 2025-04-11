@@ -1,5 +1,6 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE TypeOperators    #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators       #-}
 
 module GHRB.IO
   ( randomBuild
@@ -9,12 +10,15 @@ module GHRB.IO
   ) where
 
 import qualified Data.ByteString.Char8         as BS (pack)
+import           Data.HashMap.Strict           (keysSet)
 import qualified Data.HashSet                  as Set (difference, intersection,
-                                                       size)
-import           Data.List                     (uncons)
+                                                       map, size)
+import           Data.List                     (uncons, delete)
 import qualified Data.Text                     as T (unpack)
+import qualified Data.Text.Lazy                as TL (pack)
 import           Data.Time.Clock               (UTCTime)
-import           Distribution.Portage.Types    (Package)
+import           Distribution.Portage.Types    (Package (Package, getVersion),
+                                                Repository (Repository))
 import           Effectful                     (Eff, (:>))
 import           Effectful.Concurrent          (Concurrent)
 import           Effectful.FileSystem          (FileSystem)
@@ -30,7 +34,7 @@ import           GHRB.Core                     (addTried, failedResolve,
                                                 parseDowngrades,
                                                 parsePackageList, prettyPackage,
                                                 toDate, updateInstalled)
-import           GHRB.Core.Types               (Args,
+import           GHRB.Core.Types               (
                                                 EmergeResult (BuildFailed, EmergeSuccess),
                                                 PackageSet,
                                                 PrelimEmergeResult (PrelimEmergeSuccess, ResolveFailed, TriedToDowngrade),
@@ -39,7 +43,7 @@ import           GHRB.Core.Types               (Args,
                                                 getAllPackages, getEmerge,
                                                 getHU, getPquery, installed,
                                                 package, prettyPrintSt,
-                                                successPackage, untried)
+                                                successPackage, untried, Args)
 import           GHRB.Core.Utils               (prettyMessage, prettyPreMerge,
                                                 prettyTry)
 import           GHRB.IO.Cmd                   (defaultEmergeArgs,
@@ -49,7 +53,12 @@ import           GHRB.IO.Cmd                   (defaultEmergeArgs,
                                                 runTransparent)
 import           GHRB.IO.Utils                 (bStderr, bStdout, logOutput,
                                                 stderr, stdout)
+import           RevdepScanner                 (ConstraintMap,
+                                                MatchMode (Matching, NonMatching),
+                                                argsR, lookupResults, parseAll)
 import           System.Exit                   (ExitCode (ExitFailure, ExitSuccess))
+
+import Debug.Trace
 
 tmpLogRoot :: String
 tmpLogRoot = "/tmp/random-pkg-"
@@ -66,13 +75,15 @@ runPquery args = do
     ExitSuccess -> pure (exitCode, parsePackageList packageList, stdErr)
     _           -> pure (exitCode, Nothing, stdErr)
 
-allPackages :: (Process :> es) => FilePath -> Eff es (Maybe PackageSet)
-allPackages pquery = do
-  let args = defaultPqueryArgs ++ ["--repo", repo]
-  (exitCode, packageList, _) <- readProcessWithExitCode pquery args ""
-  case exitCode of
-    ExitSuccess -> pure (parsePackageList packageList)
-    _           -> pure Nothing
+allPackages :: (Process :> es) => Maybe Package -> FilePath -> Eff es (Maybe PackageSet)
+allPackages pkg pquery = case pkg of
+                           Nothing -> do
+                                      let args = defaultPqueryArgs ++ ["--repo", repo]
+                                      (exitCode, packageList, _) <- readProcessWithExitCode pquery args ""
+                                      case exitCode of
+                                        ExitSuccess -> pure (parsePackageList packageList)
+                                        _           -> pure Nothing
+                           Just p -> Just <$> revdeps pquery p
 
 runEmerge ::
      (Process :> es, Reader Args :> es)
@@ -87,12 +98,7 @@ runEmerge args pkg =
       ""
 
 runHaskellUpdater ::
-     ( 
-      FileSystem :> es
-     , Process :> es
-     , Reader Args :> es
-     , Concurrent :> es
-     )
+     (FileSystem :> es, Process :> es, Reader Args :> es, Concurrent :> es)
   => Eff es (ExitCode, Stdout, Stderr)
 runHaskellUpdater =
   asks getHU >>= \haskellUpdater -> runTransparent haskellUpdater defaultHUArgs
@@ -104,8 +110,26 @@ currentUntried = do
   ap <- asks getAllPackages
   rawInstalled <- currentInstalled
   case rawInstalled of
-    Left _     -> pure rawInstalled
+    Left _     -> error "failed to parse list of installed packages"
     Right inst -> pure . Right $ Set.difference ap inst
+
+revdeps :: Process :> es => FilePath -> Package -> Eff es PackageSet
+revdeps pquery p = do
+  let args' = delete "--unfiltered" . delete "--raw" . argsR $ Repository repo
+  (_, out, _) <- traceShow args' readProcessWithExitCode pquery args' ""
+  let m =
+        case parseAll . TL.pack $ out of
+          Right (rm :: ConstraintMap) -> rm
+          Left _                      -> error "failed to parse contraint map"
+      mode =
+        case getVersion p of
+          Nothing -> Matching
+          _       -> NonMatching
+      r = lookupResults mode p m
+  pure
+    . Set.map (\(c, pkg, _, _, _) -> Package c pkg Nothing Nothing Nothing)
+    . keysSet
+    $ r
 
 currentInstalled ::
      (Reader Args :> es, Process :> es, FileSystem :> es)
@@ -166,8 +190,7 @@ processIfNotDowngrade output = do
     else pure (PrelimEmergeSuccess, output)
 
 install ::
-     ( 
-     FileSystem :> es
+     ( FileSystem :> es
      , State St :> es
      , Reader Args :> es
      , Process :> es

@@ -1,4 +1,4 @@
-packages: ./*.cabal
+packages: ./*.cabal, ../revdep-scanner/*.cabal
 
 program-options
     ghc-options: -threaded
